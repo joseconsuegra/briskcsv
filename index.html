@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BriskCSV | High-Performance Local CSV Viewer</title>
+    <style>
+        :root { --primary: #0056b3; --bg: #f4f7f6; --text: #333; --danger: #dc3545; --tech-col: #6c757d; }
+        body { font-family: system-ui, -apple-system, sans-serif; padding: 20px; background: var(--bg); color: var(--text); }
+        
+        .panel { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); margin-bottom: 20px; }
+        h1 { margin-top: 0; font-size: 1.5rem; color: var(--primary); }
+        
+        .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        input[type="text"], input[type="number"], select, button { padding: 8px 12px; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem; }
+        button { background: var(--primary); color: white; border: none; cursor: pointer; font-weight: bold; transition: opacity 0.2s, background-color 0.2s; }
+        button:hover { opacity: 0.9; }
+        button:disabled, input:disabled { background: #ccc; cursor: not-allowed; opacity: 0.7; }
+        
+        button.active-filter { background-color: var(--danger); }
+        #btnClearFilter { background-color: #6c757d; }
+        #btnClearFilter:hover { background-color: #5a6268; }
+
+        .console { background: #1e1e1e; color: #4af626; padding: 15px; border-radius: 6px; height: 120px; overflow-y: auto; font-family: 'Courier New', monospace; font-size: 0.85rem; margin-top: 15px; white-space: pre-wrap; }
+        
+        .pagination-bar { display: flex; justify-content: space-between; align-items: center; padding: 15px; background: white; border-radius: 8px 8px 0 0; border-bottom: 2px solid var(--bg); flex-wrap: wrap; gap: 15px; }
+        .page-info { font-weight: bold; margin: 0 15px; }
+
+        .table-container { background: white; border-radius: 0 0 8px 8px; overflow-x: auto; box-shadow: 0 2px 4px rgba(0,0,0,0.05); min-height: 200px; }
+        table { width: 100%; border-collapse: collapse; min-width: 600px; }
+        th, td { border: 1px solid #eee; padding: 10px; text-align: left; font-size: 0.9rem; white-space: nowrap; }
+        th { background-color: var(--primary); color: white; position: sticky; top: 0; user-select: none; }
+        th.sortable:hover { background-color: #004494; cursor: pointer; }
+        .type-badge { font-size: 0.7em; font-weight: normal; opacity: 0.8; display: block; }
+        
+        th.internal-id-col { background-color: var(--tech-col); width: 1%; }
+        th.internal-id-col:hover { background-color: #5a6268; }
+        td.internal-id-cell { color: #999; text-align: right; background-color: #fcfcfc; }
+        .toggle-container { display: flex; align-items: center; gap: 5px; font-size: 0.9rem; color: #555; }
+    </style>
+</head>
+<body>
+
+    <!-- HEADER AND MAIN CONTROLS -->
+    <div class="panel">
+        <h1>BriskCSV ⚡</h1>
+        <div class="controls">
+            <input type="file" id="csvFileInput" accept=".csv" disabled title="Waiting for the database engine to start...">
+            
+            <div id="actionControls" style="display: none; gap: 10px; align-items: center;">
+                <span style="color: #ccc;">|</span>
+                <select id="colSelect"></select>
+                <input type="text" id="filterInput" placeholder="Exact or partial value...">
+                <button id="btnFilter" onclick="applyFilter()">Filter</button>
+                <button id="btnClearFilter" onclick="clearFilter()" style="display: none;">Clear Filter</button>
+                <button id="btnDistinct" onclick="requestDistinct()">Distinct Values (< 100)</button>
+            </div>
+        </div>
+        <div class="console" id="logConsole">Starting system... waiting for Web Worker.</div>
+    </div>
+
+    <!-- PAGINATION CONTROLS -->
+    <div class="pagination-bar" id="paginationBar" style="display: none;">
+        <div style="display: flex; align-items: center; gap: 20px;">
+            <div>
+                Show 
+                <select id="pageSizeSelect" onchange="changePageSize()">
+                    <option value="10">10</option>
+                    <option value="25">25</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                    <option value="500">500</option>
+                </select>
+                rows
+            </div>
+            <label class="toggle-container">
+                <input type="checkbox" id="chkShowId" onchange="toggleLineNumbers()">
+                Show line number
+            </label>
+        </div>
+        <div style="display: flex; align-items: center;">
+            <button id="btnPrev" onclick="prevPage()">◀</button>
+            <span class="page-info">
+                Page <input type="number" id="pageInput" min="1" value="1" style="width: 70px; text-align: center; padding: 5px;"> of <span id="totalPagesText">1</span>
+            </span>
+            <button id="btnNext" onclick="nextPage()">▶</button>
+        </div>
+    </div>
+
+    <!-- TABLE CONTAINER -->
+    <div class="table-container">
+        <!-- 🛠️ REMOVED LOADINGOVERLAY AND PROGRESSBAR CODE -->
+        <table id="dataTable">
+            <thead id="tableHead"></thead>
+            <tbody id="tableBody"></tbody>
+        </table>
+    </div>
+
+    <script>
+        // DOM References
+        const logConsole = document.getElementById('logConsole');
+        const fileInput = document.getElementById('csvFileInput');
+        const actionControls = document.getElementById('actionControls');
+        const colSelect = document.getElementById('colSelect');
+        const filterInput = document.getElementById('filterInput');
+        const btnFilter = document.getElementById('btnFilter');
+        const btnClearFilter = document.getElementById('btnClearFilter');
+        const tableHead = document.getElementById('tableHead');
+        const tableBody = document.getElementById('tableBody');
+        const paginationBar = document.getElementById('paginationBar');
+        const pageInput = document.getElementById('pageInput');
+        const chkShowId = document.getElementById('chkShowId');
+
+        // Global State
+        let currentSchema = null;
+        let currentPage = 1;
+        let totalRecords = 0;
+        let lastQueryData = []; 
+        let sortCol = null;
+        let sortOrder = 'NONE';
+        let activeFilterValue = '';
+
+        // Load preferences from LocalStorage
+        let pageSize = parseInt(localStorage.getItem('csv_page_size')) || 25;
+        document.getElementById('pageSizeSelect').value = pageSize;
+        
+        let showLineNumbers = localStorage.getItem('csv_show_id') === 'true';
+        chkShowId.checked = showLineNumbers;
+
+        // Logging Utility
+        function log(msg) {
+            const time = new Date().toLocaleTimeString();
+            logConsole.textContent += `\n[${time}] ${msg}`;
+            // 🛠️ Auto-scroll to see the progress go down
+            logConsole.scrollTop = logConsole.scrollHeight;
+        }
+        
+        // ==========================================
+        // COMMUNICATION WITH WEB WORKER
+        // ==========================================
+        
+        const worker = new Worker('worker.js?v=' + Date.now());
+
+        worker.onerror = function(error) {
+            log('❌ FATAL WORKER ERROR: Could not start.');
+            console.error(error);
+        };
+
+        worker.onmessage = function(e) {
+            const { type, msg, data } = e.data; 
+            switch (type) {
+                case 'log': 
+                    log(msg); 
+                    break;
+                case 'error': 
+                    log('❌ ERROR: ' + msg); 
+                    break;
+                case 'ready':
+                    fileInput.disabled = false;
+                    log('✅ System ready. Please select a CSV file.');
+                    break;
+                case 'schema_ready':
+                    setupTableUI(data);
+                    break;
+                case 'import_done':
+                    // When finished, request data to fill the table
+                    requestQuery(true); 
+                    break;
+                case 'query_result':
+                    totalRecords = data.total;
+                    lastQueryData = data.rows; 
+                    renderHeaders(); 
+                    renderTable(data.rows);
+                    updatePaginationUI();
+                    break;
+                case 'distinct_result':
+                    handleDistinctResult(data);
+                    break;
+            }
+        };
+
+        // ==========================================
+        // MAIN EVENTS AND FUNCTIONS
+        // ==========================================
+
+        fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            log(`Starting file analysis: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
+            
+            clearFilter();
+            sortCol = null;
+            sortOrder = 'NONE';
+            
+            // Simply clear the previous screen while loading
+            showLoadingState();
+            
+            worker.postMessage({ 
+                action: 'analyze_file', 
+                payload: file 
+            });
+        });
+
+        // 🛠️ UPDATED: No longer shows any div, just hides the previous table
+        function showLoadingState() {
+            tableHead.innerHTML = '';
+            tableBody.innerHTML = '';
+            actionControls.style.display = 'none';
+            paginationBar.style.display = 'none';
+        }
+
+        function setupTableUI(schema) {
+            currentSchema = schema; 
+            actionControls.style.display = 'flex';
+            colSelect.innerHTML = schema.columns.map(c => `<option value="${c.name}">${c.name}</option>`).join('');
+        }
+
+        // ==========================================
+        // RENDERING AND SORTING
+        // ==========================================
+
+        function toggleLineNumbers() {
+            showLineNumbers = chkShowId.checked;
+            localStorage.setItem('csv_show_id', showLineNumbers);
+            
+            if (currentSchema && lastQueryData.length > 0) {
+                renderHeaders();
+                renderTable(lastQueryData);
+            }
+        }
+
+        function renderHeaders() {
+            if (!currentSchema) return;
+
+            let html = '<tr>';
+            
+            if (showLineNumbers) {
+                let idIndicator = '';
+                if (sortCol === null || sortCol === 'csvv_internal_id') {
+                    if (sortOrder === 'DESC' && sortCol === 'csvv_internal_id') idIndicator = ' &nbsp; ▼';
+                    else idIndicator = ' &nbsp; ▲';
+                }
+
+                html += `<th class="sortable internal-id-col" onclick="handleSort('csvv_internal_id')" title="Click to sort">
+                            Line${idIndicator} <span class="type-badge">[INTEGER]</span>
+                         </th>`;
+            }
+
+            html += currentSchema.columns.map(c => {
+                let indicator = '';
+                if (sortCol === c.name) {
+                    if (sortOrder === 'ASC') indicator = ' &nbsp; ▲';
+                    else if (sortOrder === 'DESC') indicator = ' &nbsp; ▼';
+                }
+                
+                return `<th class="sortable" onclick="handleSort('${c.name}')" title="Click to sort">
+                    ${c.name}${indicator}
+                    <span class="type-badge">[${c.sqliteType}]</span>
+                </th>`;
+            }).join('');
+            
+            html += '</tr>';
+            tableHead.innerHTML = html;
+        }
+
+        function handleSort(colName) {
+            if (sortCol !== colName) {
+                sortCol = colName;
+                sortOrder = 'ASC';
+            } else {
+                if (sortOrder === 'ASC') {
+                    sortOrder = 'DESC';
+                } else if (sortOrder === 'DESC') {
+                    sortOrder = 'NONE';
+                    sortCol = null; 
+                }
+            }
+            requestQuery(true); 
+        }
+
+        function renderTable(rows) {
+            if (!rows || rows.length === 0) {
+                tableBody.innerHTML = '<tr><td colspan="100%" style="text-align:center;">No results found.</td></tr>';
+                return;
+            }
+
+            const dataHeaders = Object.keys(rows[0]).filter(key => key !== 'csvv_internal_id');
+            
+            let finalHTML = '';
+            for (let i = 0; i < rows.length; i++) {
+                const row = rows[i];
+                let rowHtml = '<tr>';
+                
+                if (showLineNumbers) {
+                    rowHtml += `<td class="internal-id-cell">${row['csvv_internal_id']}</td>`;
+                }
+
+                for (let j = 0; j < dataHeaders.length; j++) {
+                    const h = dataHeaders[j];
+                    const cellData = row[h] !== null && row[h] !== undefined ? row[h] : '';
+                    rowHtml += `<td>${cellData}</td>`;
+                }
+                
+                rowHtml += '</tr>';
+                finalHTML += rowHtml;
+            }
+            
+            tableBody.innerHTML = finalHTML;
+        }
+
+        // ==========================================
+        // FILTERS AND WORKER CALLS
+        // ==========================================
+
+        function applyFilter() {
+            const value = filterInput.value.trim();
+            activeFilterValue = value;
+            
+            if (value !== '') {
+                btnFilter.classList.add('active-filter');
+                btnClearFilter.style.display = 'inline-block';
+            } else {
+                clearFilterUI();
+            }
+            requestQuery(true);
+        }
+        
+        function clearFilter() {
+            filterInput.value = '';
+            activeFilterValue = '';
+            clearFilterUI();
+            requestQuery(true);
+        }
+        
+        function clearFilterUI() {
+            btnFilter.classList.remove('active-filter');
+            btnClearFilter.style.display = 'none';
+        }
+
+        function requestQuery(resetPage = false) {
+            if (resetPage) currentPage = 1;
+            
+            const column = colSelect.value || currentSchema?.columns[0]?.name;
+            const offset = (currentPage - 1) * pageSize;
+            
+            worker.postMessage({
+                action: 'query_data',
+                payload: { 
+                    column, 
+                    value: activeFilterValue, 
+                    limit: pageSize, offset: offset,
+                    sortCol: sortCol,      
+                    sortOrder: sortOrder
+                }
+            });
+        }
+
+        function requestDistinct() {
+            const column = colSelect.value;
+            worker.postMessage({ action: 'get_distinct', payload: { column } });
+        }
+
+        // ==========================================
+        // PAGINATION LOGIC
+        // ==========================================
+
+        pageInput.addEventListener('change', () => {
+            const totalPages = Math.ceil(totalRecords / pageSize) || 1;
+            let val = parseInt(pageInput.value);
+
+            if (isNaN(val) || val < 1) val = 1;
+            if (val > totalPages) val = totalPages;
+
+            pageInput.value = val;
+            currentPage = val;
+            requestQuery(false);
+        });
+
+        function updatePaginationUI() {
+            paginationBar.style.display = 'flex';
+            const totalPages = Math.ceil(totalRecords / pageSize) || 1;
+            
+            document.getElementById('totalPagesText').innerText = `${totalPages} (Total: ${totalRecords.toLocaleString()} records)`;
+            pageInput.value = currentPage; 
+            
+            document.getElementById('btnPrev').disabled = currentPage === 1;
+            document.getElementById('btnNext').disabled = currentPage === totalPages;
+        }
+
+        function prevPage() {
+            if (currentPage > 1) {
+                currentPage--;
+                requestQuery();
+            }
+        }
+
+        function nextPage() {
+            const totalPages = Math.ceil(totalRecords / pageSize) || 1;
+            if (currentPage < totalPages) {
+                currentPage++;
+                requestQuery();
+            }
+        }
+
+        function changePageSize() {
+            pageSize = parseInt(document.getElementById('pageSizeSelect').value);
+            localStorage.setItem('csv_page_size', pageSize);
+            requestQuery(true);
+        }
+
+        function handleDistinctResult(result) {
+            if (result.error) alert(result.error);
+            else alert(`Unique values found (${result.values.length}):\n\n` + result.values.join(', '));
+        }
+    </script>
+</body>
+</html>
