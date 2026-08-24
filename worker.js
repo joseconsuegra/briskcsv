@@ -10,26 +10,35 @@ let sqlite3;
         importScripts('sqlite3.js'); 
         
         postMessage({ type: 'log', msg: '⏳ Initializing WASM module...' });
-        sqlite3 = await self.sqlite3InitModule();
         
-        // 🛠️ COMPROBACIÓN EXPLICITA DE OPFS
-        if ('storage' in navigator && 'getDirectory' in navigator.storage) {
-            postMessage({ type: 'log', msg: '🔍 Browser supports native OPFS storage.' });
-        } else {
-            postMessage({ type: 'log', msg: '⚠️ Browser does not support native OPFS storage.' });
-        }
-
+        // 🛠️ CONFIGURACIÓN EXPLÍCITA DEL PROXY OPFS
+        sqlite3 = await self.sqlite3InitModule({
+            print: console.log,
+            printErr: console.error,
+            // Indicamos explícitamente el nombre del proxy que subiste a GitHub
+            locateFile: (path) => {
+                return path;
+            }
+        });
+        
         if ('opfs' in sqlite3) {
             db = new sqlite3.oo1.OpfsDb('/visor_csv_masivo.sqlite3');
             postMessage({ type: 'log', msg: '✅ Database mounted on disk (OPFS).' });
         } else {
-            // Vamos a intentar forzar o ver por qué falló
-            postMessage({ type: 'log', msg: '⚠️ OPFS property not found in sqlite3 object. Falling back to RAM.' });
-            db = new sqlite3.oo1.DB('/visor_csv_masivo.sqlite3', 'ct');
+            // Vamos a forzar un intento de inicialización manual si sqlite3.oo1 tiene métodos de OPFS alternativos
+            try {
+                postMessage({ type: 'log', msg: '⚠️ OPFS property not found. Trying manual OPFS binding...' });
+                // En algunas versiones el OPFS requiere una inicialización asíncrona explícita
+                db = new sqlite3.oo1.OpfsDb('/visor_csv_masivo.sqlite3');
+                postMessage({ type: 'log', msg: '✅ Database mounted on disk (OPFS forced).' });
+            } catch (innerErr) {
+                postMessage({ type: 'log', msg: '⚠️ Manual OPFS failed: ' + innerErr.message + '. Falling back to RAM.' });
+                db = new sqlite3.oo1.DB('/visor_csv_masivo.sqlite3', 'ct');
+            }
         }
         postMessage({ type: 'ready' });
     } catch (err) {
-        postMessage({ type: 'error', msg: 'Failed to start SQLite: ' + err.message + ' (Stack: ' + err.stack + ')' });
+        postMessage({ type: 'error', msg: 'Failed to start SQLite: ' + err.message });
     }
 })();
 
