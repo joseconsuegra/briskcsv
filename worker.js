@@ -10,32 +10,16 @@ let sqlite3;
         importScripts('sqlite3.js'); 
         
         postMessage({ type: 'log', msg: '⏳ Initializing WASM module...' });
+        sqlite3 = await self.sqlite3InitModule();
         
-        // 🛠️ CONFIGURACIÓN EXPLÍCITA DEL PROXY OPFS
-        sqlite3 = await self.sqlite3InitModule({
-            print: console.log,
-            printErr: console.error,
-            // Indicamos explícitamente el nombre del proxy que subiste a GitHub
-            locateFile: (path) => {
-                return path;
-            }
-        });
-        
-        if ('opfs' in sqlite3) {
+        try {
             db = new sqlite3.oo1.OpfsDb('/visor_csv_masivo.sqlite3');
             postMessage({ type: 'log', msg: '✅ Database mounted on disk (OPFS).' });
-        } else {
-            // Vamos a forzar un intento de inicialización manual si sqlite3.oo1 tiene métodos de OPFS alternativos
-            try {
-                postMessage({ type: 'log', msg: '⚠️ OPFS property not found. Trying manual OPFS binding...' });
-                // En algunas versiones el OPFS requiere una inicialización asíncrona explícita
-                db = new sqlite3.oo1.OpfsDb('/visor_csv_masivo.sqlite3');
-                postMessage({ type: 'log', msg: '✅ Database mounted on disk (OPFS forced).' });
-            } catch (innerErr) {
-                postMessage({ type: 'log', msg: '⚠️ Manual OPFS failed: ' + innerErr.message + '. Falling back to RAM.' });
-                db = new sqlite3.oo1.DB('/visor_csv_masivo.sqlite3', 'ct');
-            }
+        } catch (opfsErr) {
+            postMessage({ type: 'log', msg: '⚠️ OPFS unavailable. Falling back to RAM.' });
+            db = new sqlite3.oo1.DB('/visor_csv_masivo.sqlite3', 'ct');
         }
+
         postMessage({ type: 'ready' });
     } catch (err) {
         postMessage({ type: 'error', msg: 'Failed to start SQLite: ' + err.message });
@@ -49,13 +33,12 @@ self.onmessage = async function(e) {
     try {
         if (action === 'analyze_file') {
             const file = payload;
-            const fileSize = file.size; // Extract the original File object size
+            const fileSize = file.size; 
             
             postMessage({ type: 'log', msg: 'Sampling file to detect structure...' });
             
             const sampleLines = await getCSVSample(file, 100);
             
-            // Detect delimiter
             const delimiter = detectDelimiter(sampleLines);
             let delimiterName = delimiter === '\t' ? 'Tab (\\t)' : delimiter;
             postMessage({ type: 'log', msg: `🔍 Automatic delimiter detected: [ ${delimiterName} ]` });
@@ -80,7 +63,6 @@ self.onmessage = async function(e) {
 // CORE FUNCTIONS (Reading and Analysis)
 // ==========================================
 
-// Expert parser to handle commas inside quotes (typical in CRMs)
 function parseCSVLine(text, separator = ',') {
     const result = [];
     let current = '';
@@ -106,7 +88,6 @@ function parseCSVLine(text, separator = ',') {
     return result;
 }
 
-// Heuristic function to discover the delimiter
 function detectDelimiter(lines) {
     if (!lines || lines.length === 0) return ',';
     
@@ -114,18 +95,14 @@ function detectDelimiter(lines) {
     let bestDelimiter = ',';
     let maxCols = 1;
 
-    // Evaluate the first 10 lines to ensure consistency
     const sampleSize = Math.min(lines.length, 10);
     
     for (const sep of candidates) {
         let isConsistent = true;
-        // Try parsing row 0 with the current candidate
         let firstRowCount = parseCSVLine(lines[0], sep).length;
         
-        // If it didn't split anything, ignore this candidate
         if (firstRowCount <= 1) continue;
         
-        // Check if the rest of the rows maintain the same number of columns
         for (let i = 1; i < sampleSize; i++) {
             if (parseCSVLine(lines[i], sep).length !== firstRowCount) {
                 isConsistent = false;
@@ -133,15 +110,12 @@ function detectDelimiter(lines) {
             }
         }
 
-        // If consistent and has more columns than the current winner, replace it
         if (isConsistent && firstRowCount > maxCols) {
             maxCols = firstRowCount;
             bestDelimiter = sep;
         }
     }
     
-    // Fallback: If the file is so broken that none is consistent,
-    // keep the one that achieves the most separations in row 0.
     if (maxCols === 1) {
         for (const sep of candidates) {
             let count = parseCSVLine(lines[0], sep).length;
@@ -155,7 +129,6 @@ function detectDelimiter(lines) {
     return bestDelimiter;
 }
 
-// Read a portion from the beginning of the file
 async function getCSVSample(file, maxLines) {
     const stream = file.stream().pipeThrough(new TextDecoderStream());
     const reader = stream.getReader();
@@ -179,7 +152,6 @@ async function getCSVSample(file, maxLines) {
     return lines;
 }
 
-// Advanced heuristics to determine column types and if a header exists
 function analyzeSample(lines, delimiter) {
     if (lines.length === 0) throw new Error("The CSV file is empty.");
     
@@ -204,7 +176,6 @@ function analyzeSample(lines, delimiter) {
 
     for (let j = 0; j < numCols; j++) {
         if (row0Types[j] === 'TEXT') stringCountRow0++;
-        // Detect common database formats like Billing_City or customerId
         if (/^[a-zA-Z0-9_]+$/.test(rows[0][j]) && (rows[0][j].includes('_') || /^[A-Z][a-z]+[A-Z]/.test(rows[0][j]))) {
             camelCaseOrUnderscoreCountRow0++;
         }
@@ -266,7 +237,8 @@ function analyzeSample(lines, delimiter) {
 
 function createTable(schema) {
     db.exec(`DROP TABLE IF EXISTS csv_data;`);
-    const createCols = schema.columns.map(c => `${c.name} ${c.sqliteType}`).join(', ');
+    // 🛠️ Protegemos con comillas dobles
+    const createCols = schema.columns.map(c => `"${c.name}" ${c.sqliteType}`).join(', ');
     db.exec(`CREATE TABLE csv_data (csvv_internal_id INTEGER PRIMARY KEY AUTOINCREMENT, ${createCols});`);
 }
 
@@ -285,12 +257,13 @@ async function startMassiveImport(file, schema, fileSize, delimiter) {
     let totalInserted = 0;
     
     let charsProcessed = 0; 
-    const estimatedTotalChars = fileSize || 1; // Avoid division by zero
+    const estimatedTotalChars = fileSize || 1; 
     
     const BATCH_SIZE = 5000;
     let batchValues = [];
 
-    const colNames = schema.columns.map(c => c.name).join(', ');
+    // 🛠️ Protegemos con comillas dobles en el INSERT
+    const colNames = schema.columns.map(c => `"${c.name}"`).join(', ');
     const placeholders = schema.columns.map(() => '?').join(', ');
     const insertSQL = `INSERT INTO csv_data (${colNames}) VALUES (${placeholders})`;
     
@@ -320,13 +293,11 @@ async function startMassiveImport(file, schema, fileSize, delimiter) {
         if (percent > 99.9 && charsProcessed < estimatedTotalChars) percent = 99.9; 
         if (percent > 100) percent = 100;
 
-        // 🛠️ SHOW PROGRESS DIRECTLY IN THE LOG
         postMessage({ 
             type: 'log', 
             msg: `⚙️ Imported ${totalInserted.toLocaleString()} rows. ${percent.toFixed(1)}% completed.` 
         });
         
-        // Yield the thread briefly so the HTML console can repaint
         await new Promise(resolve => setTimeout(resolve, 0));
     };
 
@@ -379,7 +350,8 @@ function handleQuery(payload) {
     let bindArgs = [];
     
     if (value && value.trim() !== '') {
-        whereClause = ` WHERE ${column} LIKE ?`;
+        // 🛠️ Protegemos con comillas dobles
+        whereClause = ` WHERE "${column}" LIKE ?`;
         bindArgs.push(`%${value}%`);
     }
 
@@ -393,7 +365,8 @@ function handleQuery(payload) {
 
     let orderClause = 'ORDER BY csvv_internal_id ASC';
     if (sortCol && sortOrder !== 'NONE') {
-        orderClause = `ORDER BY ${sortCol} ${sortOrder}, csvv_internal_id ASC`;
+        // 🛠️ Protegemos con comillas dobles
+        orderClause = `ORDER BY "${sortCol}" ${sortOrder}, csvv_internal_id ASC`;
     }
 
     const sql = `SELECT * FROM csv_data ${whereClause} ${orderClause} LIMIT ? OFFSET ?`;
@@ -412,7 +385,8 @@ function handleQuery(payload) {
 
 function handleDistinct(payload) {
     const { column } = payload;
-    const sql = `SELECT DISTINCT ${column} AS val FROM csv_data WHERE ${column} IS NOT NULL LIMIT 101`;
+    // 🛠️ Protegemos con comillas dobles
+    const sql = `SELECT DISTINCT "${column}" AS val FROM csv_data WHERE "${column}" IS NOT NULL LIMIT 101`;
     const rows = [];
     db.exec({
         sql: sql,
