@@ -298,6 +298,11 @@ async function startMassiveImport(file, schema, fileSize, delimiter) {
             type: 'log', 
             msg: `⚙️ Imported ${totalInserted.toLocaleString()} rows. ${percent.toFixed(1)}% completed.` 
         });
+
+        postMessage({ 
+            type: 'progress', 
+            data: { rows: totalInserted, percent: percent.toFixed(1) } 
+        });
         
         await new Promise(resolve => setTimeout(resolve, 0));
     };
