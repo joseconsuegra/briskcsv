@@ -131,7 +131,8 @@ function detectDelimiter(lines) {
 }
 
 async function getCSVSample(file, maxLines) {
-    const stream = file.stream().pipeThrough(new TextDecoderStream());
+    // Intentamos leer con windows-1252 para soportar caracteres como '¦' en sistemas legacy
+    const stream = file.stream().pipeThrough(new TextDecoderStream('windows-1252'));
     const reader = stream.getReader();
     let buffer = '';
     const lines = [];
@@ -250,7 +251,8 @@ function createTable(schema) {
 async function startMassiveImport(file, schema, fileSize, delimiter) {
     postMessage({ type: 'log', msg: '🚀 Starting massive import...' });
     
-    const stream = file.stream().pipeThrough(new TextDecoderStream());
+    // Usamos 'windows-1252' aquí también para que lea los bytes correctamente
+    const stream = file.stream().pipeThrough(new TextDecoderStream('windows-1252'));
     const reader = stream.getReader();
     
     let buffer = '';
@@ -263,7 +265,6 @@ async function startMassiveImport(file, schema, fileSize, delimiter) {
     const BATCH_SIZE = 5000;
     let batchValues = [];
 
-    // 🛠️ Protegemos con comillas dobles en el INSERT
     const colNames = schema.columns.map(c => `"${c.name}"`).join(', ');
     const placeholders = schema.columns.map(() => '?').join(', ');
     const insertSQL = `INSERT INTO csv_data (${colNames}) VALUES (${placeholders})`;
