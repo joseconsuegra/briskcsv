@@ -91,7 +91,7 @@ function parseCSVLine(text, separator = ',') {
 function detectDelimiter(lines) {
     if (!lines || lines.length === 0) return ',';
     
-    // 🛠️ Ponemos '¦' el primero para que tenga máxima prioridad en este tipo de ficheros
+    // Priorizamos '¦' primero, seguido de los delimitadores estándar
     const candidates = ['¦', ',', ';', '\t', '|'];
     let bestDelimiter = '¦';
     let maxCols = 1;
@@ -131,7 +131,7 @@ function detectDelimiter(lines) {
 }
 
 async function getCSVSample(file, maxLines) {
-    // Intentamos leer con windows-1252 para soportar caracteres como '¦' en sistemas legacy
+    // Usamos windows-1252 para soportar correctamente ficheros industriales/legacy con el carácter ¦
     const stream = file.stream().pipeThrough(new TextDecoderStream('windows-1252'));
     const reader = stream.getReader();
     let buffer = '';
@@ -239,7 +239,7 @@ function analyzeSample(lines, delimiter) {
 
 function createTable(schema) {
     db.exec(`DROP TABLE IF EXISTS csv_data;`);
-    // 🛠️ Protegemos con comillas dobles
+    // Usamos comillas dobles en los nombres de columnas para proteger palabras reservadas como "Group"
     const createCols = schema.columns.map(c => `"${c.name}" ${c.sqliteType}`).join(', ');
     db.exec(`CREATE TABLE csv_data (csvv_internal_id INTEGER PRIMARY KEY AUTOINCREMENT, ${createCols});`);
 }
@@ -251,7 +251,6 @@ function createTable(schema) {
 async function startMassiveImport(file, schema, fileSize, delimiter) {
     postMessage({ type: 'log', msg: '🚀 Starting massive import...' });
     
-    // Usamos 'windows-1252' aquí también para que lea los bytes correctamente
     const stream = file.stream().pipeThrough(new TextDecoderStream('windows-1252'));
     const reader = stream.getReader();
     
@@ -352,7 +351,6 @@ function handleQuery(payload) {
     let bindArgs = [];
     
     if (value && value.trim() !== '') {
-        // 🛠️ Protegemos con comillas dobles
         whereClause = ` WHERE "${column}" LIKE ?`;
         bindArgs.push(`%${value}%`);
     }
@@ -367,7 +365,6 @@ function handleQuery(payload) {
 
     let orderClause = 'ORDER BY csvv_internal_id ASC';
     if (sortCol && sortOrder !== 'NONE') {
-        // 🛠️ Protegemos con comillas dobles
         orderClause = `ORDER BY "${sortCol}" ${sortOrder}, csvv_internal_id ASC`;
     }
 
@@ -387,7 +384,6 @@ function handleQuery(payload) {
 
 function handleDistinct(payload) {
     const { column } = payload;
-    // 🛠️ Protegemos con comillas dobles
     const sql = `SELECT DISTINCT "${column}" AS val FROM csv_data WHERE "${column}" IS NOT NULL LIMIT 101`;
     const rows = [];
     db.exec({
