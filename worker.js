@@ -35,22 +35,29 @@ self.onmessage = async function(e) {
             const file = payload;
             const fileSize = file.size; 
             
-            postMessage({ type: 'log', msg: 'Sampling file to detect structure...' });
+            postMessage({ type: 'log', msg: 'Sampling file to detect encoding and structure...' });
             
-            const sampleLines = await getCSVSample(file, 100);
+            // 1. Detectar codificación automáticamente (UTF-8 vs Windows-1252)
+            const encoding = await detectEncoding(file);
+            postMessage({ type: 'log', msg: `🔤 Encoding detected: [ ${encoding.toUpperCase()} ]` });
+
+            // 2. Obtener muestra con la codificación correcta
+            const sampleLines = await getCSVSample(file, 100, encoding);
             
+            // 3. Detectar delimitador
             const delimiter = detectDelimiter(sampleLines);
             let delimiterName = delimiter === '\t' ? 'Tab (\\t)' : delimiter;
             postMessage({ type: 'log', msg: `🔍 Automatic delimiter detected: [ ${delimiterName} ]` });
 
+            // 4. Analizar esquema
             const schema = analyzeSample(sampleLines, delimiter);
-            
             postMessage({ type: 'log', msg: `Schema detected. Columns: ${schema.columns.length}, Header: ${schema.hasHeader ? 'Yes' : 'No'}` });
             
             createTable(schema);
             postMessage({ type: 'schema_ready', data: schema });
             
-            await startMassiveImport(file, schema, fileSize, delimiter);
+            // 5. Importar usando la codificación detectada
+            await startMassiveImport(file, schema, fileSize, delimiter, encoding);
         }
         if (action === 'query_data') handleQuery(payload);
         if (action === 'get_distinct') handleDistinct(payload);
@@ -60,8 +67,21 @@ self.onmessage = async function(e) {
 };
 
 // ==========================================
-// CORE FUNCTIONS (Reading and Analysis)
+// CORE FUNCTIONS (Encoding, Reading & Analysis)
 // ==========================================
+
+// Detecta si el archivo es UTF-8 válido; si tiene bytes ANSI/Latin-1 (como ¦ \xa6), usa windows-1252
+async function detectEncoding(file) {
+    const slice = file.slice(0, 65536); // Analizamos los primeros 64 KB
+    const buffer = await slice.arrayBuffer();
+    try {
+        const decoder = new TextDecoder('utf-8', { fatal: true });
+        decoder.decode(buffer);
+        return 'utf-8';
+    } catch (e) {
+        return 'windows-1252';
+    }
+}
 
 function parseCSVLine(text, separator = ',') {
     const result = [];
@@ -91,9 +111,8 @@ function parseCSVLine(text, separator = ',') {
 function detectDelimiter(lines) {
     if (!lines || lines.length === 0) return ',';
     
-    // Priorizamos '¦' primero, seguido de los delimitadores estándar
     const candidates = ['¦', ',', ';', '\t', '|'];
-    let bestDelimiter = '¦';
+    let bestDelimiter = ',';
     let maxCols = 1;
 
     const sampleSize = Math.min(lines.length, 10);
@@ -130,9 +149,8 @@ function detectDelimiter(lines) {
     return bestDelimiter;
 }
 
-async function getCSVSample(file, maxLines) {
-    // Usamos windows-1252 para soportar correctamente ficheros industriales/legacy con el carácter ¦
-    const stream = file.stream().pipeThrough(new TextDecoderStream('windows-1252'));
+async function getCSVSample(file, maxLines, encoding) {
+    const stream = file.stream().pipeThrough(new TextDecoderStream(encoding));
     const reader = stream.getReader();
     let buffer = '';
     const lines = [];
@@ -178,7 +196,7 @@ function analyzeSample(lines, delimiter) {
 
     for (let j = 0; j < numCols; j++) {
         if (row0Types[j] === 'TEXT') stringCountRow0++;
-        if (/^[a-zA-Z0-9_]+$/.test(rows[0][j]) && (rows[0][j].includes('_') || /^[A-Z][a-z]+[A-Z]/.test(rows[0][j]))) {
+        if (/^[a-zA-Z0-9_À-ÿ]+$/.test(rows[0][j]) && (rows[0][j].includes('_') || /^[A-ZÀ-Ý][a-zà-ÿ]+[A-ZÀ-Ý]/.test(rows[0][j]))) {
             camelCaseOrUnderscoreCountRow0++;
         }
     }
@@ -211,10 +229,20 @@ function analyzeSample(lines, delimiter) {
 
     let headers = [];
     if (hasHeader) {
+        const usedNames = new Set();
         headers = rows[0].map((h, i) => {
-            let cleanH = h.replace(/[^a-zA-Z0-9_]/g, '');
+            // Permitimos letras acentuadas (À-ÿ), números y guiones bajos
+            let cleanH = h.trim().replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_À-ÿ]/g, '');
             if (/^\d/.test(cleanH) || cleanH === '') cleanH = `col_${i}`;
-            return cleanH;
+            
+            // Evitar nombres de columna duplicados
+            let finalName = cleanH;
+            let counter = 1;
+            while (usedNames.has(finalName.toLowerCase())) {
+                finalName = `${cleanH}_${counter++}`;
+            }
+            usedNames.add(finalName.toLowerCase());
+            return finalName;
         });
     } else {
         headers = Array.from({length: numCols}, (_, i) => `col_${i}`);
@@ -239,7 +267,6 @@ function analyzeSample(lines, delimiter) {
 
 function createTable(schema) {
     db.exec(`DROP TABLE IF EXISTS csv_data;`);
-    // Usamos comillas dobles en los nombres de columnas para proteger palabras reservadas como "Group"
     const createCols = schema.columns.map(c => `"${c.name}" ${c.sqliteType}`).join(', ');
     db.exec(`CREATE TABLE csv_data (csvv_internal_id INTEGER PRIMARY KEY AUTOINCREMENT, ${createCols});`);
 }
@@ -248,10 +275,10 @@ function createTable(schema) {
 // MASSIVE IMPORT
 // ==========================================
 
-async function startMassiveImport(file, schema, fileSize, delimiter) {
+async function startMassiveImport(file, schema, fileSize, delimiter, encoding) {
     postMessage({ type: 'log', msg: '🚀 Starting massive import...' });
     
-    const stream = file.stream().pipeThrough(new TextDecoderStream('windows-1252'));
+    const stream = file.stream().pipeThrough(new TextDecoderStream(encoding));
     const reader = stream.getReader();
     
     let buffer = '';
