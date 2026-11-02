@@ -27,7 +27,36 @@
         .pagination-bar { display: flex; justify-content: space-between; align-items: center; padding: 15px; background: white; border-radius: 8px 8px 0 0; border-bottom: 2px solid var(--bg); flex-wrap: wrap; gap: 15px; }
         .page-info { font-weight: bold; margin: 0 15px; }
 
-        .table-container { background: white; border-radius: 0 0 8px 8px; overflow-x: auto; box-shadow: 0 2px 4px rgba(0,0,0,0.05); min-height: 200px; }
+        /* Contenedor de la tabla y Overlay de carga */
+        .table-container { position: relative; background: white; border-radius: 0 0 8px 8px; overflow-x: auto; box-shadow: 0 2px 4px rgba(0,0,0,0.05); min-height: 250px; }
+        
+        .loading-overlay {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(255, 255, 255, 0.92);
+            display: none;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 20;
+            backdrop-filter: blur(2px);
+        }
+        .spinner {
+            width: 40px; height: 40px;
+            border: 4px solid #e0e0e0;
+            border-top: 4px solid var(--primary);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-bottom: 15px;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        
+        .progress-box { width: 320px; max-width: 85%; text-align: center; }
+        .progress-title { font-weight: bold; color: var(--primary); margin-bottom: 8px; font-size: 1rem; }
+        .progress-track { width: 100%; height: 10px; background: #e9ecef; border-radius: 5px; overflow: hidden; margin-bottom: 8px; box-shadow: inset 0 1px 2px rgba(0,0,0,0.1); }
+        .progress-fill { height: 100%; width: 0%; background: var(--primary); transition: width 0.2s ease; }
+        .progress-stats { font-size: 0.85rem; color: #555; font-variant-numeric: tabular-nums; }
+
         table { width: 100%; border-collapse: collapse; min-width: 600px; }
         th, td { border: 1px solid #eee; padding: 10px; text-align: left; font-size: 0.9rem; white-space: nowrap; }
         th { background-color: var(--primary); color: white; position: sticky; top: 0; user-select: none; }
@@ -88,9 +117,18 @@
         </div>
     </div>
 
-    <!-- TABLE CONTAINER -->
+    <!-- TABLE CONTAINER WITH LOADING OVERLAY -->
     <div class="table-container">
-        <!-- 🛠️ REMOVED LOADINGOVERLAY AND PROGRESSBAR CODE -->
+        <div class="loading-overlay" id="loadingOverlay">
+            <div class="spinner"></div>
+            <div class="progress-box">
+                <div class="progress-title" id="progressTitle">Analyzing file...</div>
+                <div class="progress-track">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+                <div class="progress-stats" id="progressStats">Preparing database...</div>
+            </div>
+        </div>
         <table id="dataTable">
             <thead id="tableHead"></thead>
             <tbody id="tableBody"></tbody>
@@ -111,6 +149,12 @@
         const paginationBar = document.getElementById('paginationBar');
         const pageInput = document.getElementById('pageInput');
         const chkShowId = document.getElementById('chkShowId');
+        
+        // Overlay References
+        const loadingOverlay = document.getElementById('loadingOverlay');
+        const progressTitle = document.getElementById('progressTitle');
+        const progressFill = document.getElementById('progressFill');
+        const progressStats = document.getElementById('progressStats');
 
         // Global State
         let currentSchema = null;
@@ -132,7 +176,6 @@
         function log(msg) {
             const time = new Date().toLocaleTimeString();
             logConsole.textContent += `\n[${time}] ${msg}`;
-            // 🛠️ Auto-scroll to see the progress go down
             logConsole.scrollTop = logConsole.scrollHeight;
         }
         
@@ -144,6 +187,7 @@
 
         worker.onerror = function(error) {
             log('❌ FATAL WORKER ERROR: Could not start.');
+            hideLoadingState();
             console.error(error);
         };
 
@@ -154,7 +198,8 @@
                     log(msg); 
                     break;
                 case 'error': 
-                    log('❌ ERROR: ' + msg); 
+                    log('❌ ERROR: ' + msg);
+                    hideLoadingState();
                     break;
                 case 'ready':
                     fileInput.disabled = false;
@@ -162,9 +207,15 @@
                     break;
                 case 'schema_ready':
                     setupTableUI(data);
+                    progressTitle.textContent = 'Importing data into local storage...';
+                    break;
+                case 'progress':
+                    progressFill.style.width = `${data.percent}%`;
+                    progressStats.textContent = `${data.rows.toLocaleString()} rows imported (${data.percent}%)`;
                     break;
                 case 'import_done':
-                    // When finished, request data to fill the table
+                    progressTitle.textContent = 'Rendering table...';
+                    progressFill.style.width = '100%';
                     requestQuery(true); 
                     break;
                 case 'query_result':
@@ -173,6 +224,7 @@
                     renderHeaders(); 
                     renderTable(data.rows);
                     updatePaginationUI();
+                    hideLoadingState();
                     break;
                 case 'distinct_result':
                     handleDistinctResult(data);
@@ -189,12 +241,15 @@
             if (!file) return;
             log(`Starting file analysis: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
             
-            clearFilter();
+            // Clear previous filters and states without triggering an old query
+            filterInput.value = '';
+            activeFilterValue = '';
+            clearFilterUI();
             sortCol = null;
             sortOrder = 'NONE';
             
-            // Simply clear the previous screen while loading
-            showLoadingState();
+            // Wipe previous table data and display the progress overlay
+            showLoadingState(file.name);
             
             worker.postMessage({ 
                 action: 'analyze_file', 
@@ -202,17 +257,26 @@
             });
         });
 
-        // 🛠️ UPDATED: No longer shows any div, just hides the previous table
-        function showLoadingState() {
+        function showLoadingState(fileName) {
             tableHead.innerHTML = '';
             tableBody.innerHTML = '';
             actionControls.style.display = 'none';
             paginationBar.style.display = 'none';
+            
+            fileInput.disabled = true;
+            progressTitle.textContent = `Reading ${fileName}...`;
+            progressFill.style.width = '0%';
+            progressStats.textContent = 'Detecting structure and delimiter...';
+            loadingOverlay.style.display = 'flex';
+        }
+
+        function hideLoadingState() {
+            loadingOverlay.style.display = 'none';
+            fileInput.disabled = false;
         }
 
         function setupTableUI(schema) {
             currentSchema = schema; 
-            actionControls.style.display = 'flex';
             colSelect.innerHTML = schema.columns.map(c => `<option value="${c.name}">${c.name}</option>`).join('');
         }
 
@@ -280,6 +344,7 @@
         }
 
         function renderTable(rows) {
+            actionControls.style.display = 'flex';
             if (!rows || rows.length === 0) {
                 tableBody.innerHTML = '<tr><td colspan="100%" style="text-align:center;">No results found.</td></tr>';
                 return;
