@@ -72,11 +72,25 @@ self.onmessage = async function(e) {
 
 // Detecta si el archivo es UTF-8 válido; si tiene bytes ANSI/Latin-1 (como ¦ \xa6), usa windows-1252
 async function detectEncoding(file) {
-    const slice = file.slice(0, 65536); // Analizamos los primeros 64 KB
+    const slice = file.slice(0, 65536);
     const buffer = await slice.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    
+    // Si el corte de 64KB cayó justo a mitad de un carácter UTF-8 de varios bytes,
+    // retrocedemos esos bytes sueltos del final para no provocar un falso error.
+    let end = bytes.length;
+    if (end === 65536) {
+        while (end > 0 && (bytes[end - 1] & 0xC0) === 0x80) {
+            end--; // Retrocede bytes de continuación (10xxxxxx)
+        }
+        if (end > 0 && (bytes[end - 1] & 0x80) !== 0) {
+            end--; // Retrocede el byte de inicio multibyte (11xxxxxx)
+        }
+    }
+
     try {
         const decoder = new TextDecoder('utf-8', { fatal: true });
-        decoder.decode(buffer);
+        decoder.decode(bytes.subarray(0, end));
         return 'utf-8';
     } catch (e) {
         return 'windows-1252';
