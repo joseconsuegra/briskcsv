@@ -91,8 +91,9 @@ function parseCSVLine(text, separator = ',') {
 function detectDelimiter(lines) {
     if (!lines || lines.length === 0) return ',';
     
-    const candidates = [',', ';', '\t', '|', '¦'];
-    let bestDelimiter = ',';
+    // 🛠️ Ponemos '¦' el primero para que tenga máxima prioridad en este tipo de ficheros
+    const candidates = ['¦', ',', ';', '\t', '|'];
+    let bestDelimiter = '¦';
     let maxCols = 1;
 
     const sampleSize = Math.min(lines.length, 10);
